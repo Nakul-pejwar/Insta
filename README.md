@@ -23,7 +23,7 @@ Advanced multi-threaded Instagram brute-force tool with Tor-based IP rotation an
 
 ## Requirements
 
-See [`requirements.txt`](requirements.txt) for full dependency list.
+See [`install.sh`](install.sh) for dependency installation.
 
 | Package | Purpose |
 |---------|---------|
@@ -35,14 +35,7 @@ See [`requirements.txt`](requirements.txt) for full dependency list.
 ### Quick Install
 
 ```bash
-# Debian/Ubuntu/Kali
-sudo apt-get install -y tor curl openssl
-
-# Arch Linux
-sudo pacman -S tor curl openssl
-
-# Fedora/RHEL
-sudo dnf install -y tor curl openssl
+sudo ./install.sh
 ```
 
 ---
@@ -52,7 +45,8 @@ sudo dnf install -y tor curl openssl
 ```bash
 git clone https://github.com/Nakul-pejwar/Insta.git
 cd Insta
-chmod +x Brute.sh
+chmod +x install.sh Brute.sh
+sudo ./install.sh
 ```
 
 ---
@@ -115,8 +109,8 @@ BACKOFF_MAX=40             # Maximum backoff delay (seconds)
 ```
 Insta/
 ├── Brute.sh          # Main brute-force script (v2.0)
+├── install.sh        # Dependency installer
 ├── pass.txt          # Default password wordlist (1,000 entries)
-├── requirements.txt  # System dependencies
 └── README.md         # This file
 ```
 
