@@ -168,12 +168,18 @@ def healthcheck(username, phone_id, adid, guid, device_id, proxy=None):
 def check_username(username):
     try:
         r = requests.get(
-            f"https://www.instagram.com/{username}/",
-            headers={"User-Agent": USER_AGENT},
+            f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+            headers={
+                "User-Agent": USER_AGENT,
+                "X-IG-App-ID": APP_ID,
+            },
             timeout=10
         )
-        if "page may have been removed" in r.text.lower() or "sorry, this page" in r.text.lower():
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("data", {}).get("user") is not None:
+                return True
             return False
-        return True
+        return False
     except Exception:
         return True
