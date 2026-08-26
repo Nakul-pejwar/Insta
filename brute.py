@@ -59,9 +59,15 @@ def do_start(args):
         threads = 1
         port_assignments = {}
 
+    all_cli = args.username and args.wordlist
+
     username = args.username
     if not username:
-        username = input(f"{Color.GREEN}Username : {Color.RESET}").strip()
+        if sys.stdin.isatty():
+            username = input(f"{Color.GREEN}Username : {Color.RESET}").strip()
+        else:
+            print(f"{Color.RED}[!] --username required in non-interactive mode{Color.RESET}")
+            return
 
     if not check_username(username):
         print(f"{Color.RED}Invalid Username! Try again{Color.RESET}")
@@ -69,8 +75,11 @@ def do_start(args):
 
     wordlist = args.wordlist
     if not wordlist:
-        wordlist = input(f"{Color.GREEN}Password List (Enter for pass.txt): {Color.RESET}").strip()
-        if not wordlist:
+        if sys.stdin.isatty():
+            wordlist = input(f"{Color.GREEN}Password List (Enter for pass.txt): {Color.RESET}").strip()
+            if not wordlist:
+                wordlist = "pass.txt"
+        else:
             wordlist = "pass.txt"
 
     if not os.path.isfile(wordlist):
@@ -78,8 +87,13 @@ def do_start(args):
         return
 
     if not args.threads and not args.tor:
-        threads_in = input(f"{Color.GREEN}Threads (Use < 20, Default 10): {Color.RESET}").strip()
-        threads = int(threads_in) if threads_in else 10
+        if all_cli:
+            threads = 10
+        elif sys.stdin.isatty():
+            threads_in = input(f"{Color.GREEN}Threads (Use < 20, Default 10): {Color.RESET}").strip()
+            threads = int(threads_in) if threads_in else 10
+        else:
+            threads = 10
 
     print(f"{Color.GREEN}[*] Fetching CSRF token...{Color.RESET}")
     csrf = fetch_csrf_token()

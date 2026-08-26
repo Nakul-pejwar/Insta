@@ -13,14 +13,26 @@ def generate_jazoest(phone_id: str) -> str:
     return f"2{amount}"
 
 
+def _load_public_key(pubkey_b64: str):
+    raw = base64.b64decode(pubkey_b64)
+    if raw.startswith(b"-----"):
+        return serialization.load_pem_public_key(raw)
+    if raw[:2] == b"\x30\x82":
+        return serialization.load_der_public_key(raw)
+    pem_text = raw.decode("ascii", errors="ignore")
+    if "-----BEGIN" in pem_text:
+        return serialization.load_pem_public_key(pem_text.encode())
+    return serialization.load_der_public_key(raw)
+
+
 def encrypt_password(password: str, key_id: int, pubkey_b64: str) -> str:
     try:
         timestamp = int(time.time())
+        timestamp_str = str(timestamp)
         session_key = os.urandom(32)
         iv = os.urandom(12)
 
-        pubkey_der = base64.b64decode(pubkey_b64)
-        public_key = serialization.load_der_public_key(pubkey_der)
+        public_key = _load_public_key(pubkey_b64)
 
         rsa_encrypted = public_key.encrypt(
             session_key,
@@ -29,7 +41,7 @@ def encrypt_password(password: str, key_id: int, pubkey_b64: str) -> str:
         rsa_size = len(rsa_encrypted)
 
         aesgcm = AESGCM(session_key)
-        aad = struct.pack(">I", timestamp)
+        aad = timestamp_str.encode("utf-8")
         aes_ciphertext = aesgcm.encrypt(iv, password.encode("utf-8"), aad)
         aes_tag = aes_ciphertext[-16:]
         aes_body = aes_ciphertext[:-16]
