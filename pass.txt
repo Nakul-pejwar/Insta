@@ -1,6 +1,7 @@
 123456
 password
 12345678
+NakulRajput@1234
 qwerty
 123456789
 12345
@@ -172,8 +173,6 @@ qwer1234
 compaq
 purple
 hardcore
-NakulRajput@1234
-
 banana
 junior
 hannah
