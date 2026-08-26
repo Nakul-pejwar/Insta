@@ -48,6 +48,7 @@ checkroot() {
 
 dependencies() {
     command -v openssl > /dev/null 2>&1 || { echo >&2 "I require openssl but it's not installed. Aborting."; exit 1; }
+    command -v xxd > /dev/null 2>&1 || { echo >&2 "I require xxd but it's not installed. Aborting."; exit 1; }
     if [[ "$MODE" == "tor" ]]; then
         command -v tor > /dev/null 2>&1 || { echo >&2 "I require tor but it's not installed. Aborting."; exit 1; }
     fi
@@ -95,104 +96,147 @@ encrypt_password() {
     local key_id="${key_id_pubkey%%|*}"
     local pubkey_b64="${key_id_pubkey#*|}"
 
+    if [[ -z "$key_id" || -z "$pubkey_b64" ]]; then
+        printf '%s' "$password"
+        return 1
+    fi
+
     local timestamp
     timestamp=$(date +%s)
 
-    # Generate random 32-byte session key and 12-byte IV
     local session_key_hex
     session_key_hex=$(openssl rand -hex 32)
     local iv_hex
     iv_hex=$(openssl rand -hex 12)
 
-    # Convert password to hex
     local plaintext_hex
     plaintext_hex=$(printf '%s' "$password" | xxd -p | tr -d '\n')
 
-    # Convert base64 public key to PEM format for RSA encryption
-    local der_hex
-    der_hex=$(printf '%s' "$pubkey_b64" | base64 -d 2>/dev/null | xxd -p | tr -d '\n')
-    local pem_header="30820122300d06092a864886f70d01010105000382010f00"
-    local pem_footer="0382010a00"
-    local pem_content="${pem_header}${der_hex}${pem_footer}"
-    local pem_body
-    pem_body=$(printf '%s' "$pem_content" | xxd -r -p | base64 | tr -d '\n' | fold -w 64)
     local rsa_pubkey_pem
-    rsa_pubkey_pem="-----BEGIN PUBLIC KEY-----\n${pem_body}\n-----END PUBLIC KEY-----"
+    rsa_pubkey_pem=$(printf '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----' "$(printf '%s' "$pubkey_b64" | fold -w 64)")
 
-    # RSA encrypt the session key using the public key
     local rsa_encrypted_hex
     rsa_encrypted_hex=$(printf '%s' "$session_key_hex" | xxd -r -p | \
         openssl pkeyutl -encrypt -pubin -pkeyopt rsa_padding_mode:pkcs1 \
         -inkey <(printf '%b' "$rsa_pubkey_pem") 2>/dev/null | xxd -p | tr -d '\n')
+
+    if [[ -z "$rsa_encrypted_hex" ]]; then
+        printf '%s' "$password"
+        return 1
+    fi
     local rsa_size=${#rsa_encrypted_hex}
     rsa_size=$((rsa_size / 2))
 
-    # AES-GCM encrypt the password with the session key
-    local aes_ciphertext
-    aes_ciphertext=$(printf '%s' "$plaintext_hex" | openssl enc -aes-256-gcm \
+    local aes_output=""
+    aes_output=$(printf '%s' "$plaintext_hex" | openssl enc -aes-256-gcm \
         -K "$session_key_hex" \
         -iv "$iv_hex" \
         -aad "$(printf '%s' "$timestamp" | xxd -p | tr -d '\n')" \
-        -nosalt 2>/dev/null | xxd -p | tr -d '\n')
+        -nosalt 2>&1 | xxd -p | tr -d '\n')
 
-    # AES-GCM appends the 16-byte tag at the end
-    local tag_hex="${aes_ciphertext: -32}"
-    local encrypted_body="${aes_ciphertext:0:${#aes_ciphertext}-32}"
+    local aes_tag=""
+    local aes_body=""
+    if [[ ${#aes_output} -ge 32 ]]; then
+        aes_tag="${aes_output: -32}"
+        aes_body="${aes_output:0:${#aes_output}-32}"
+    else
+        printf '%s' "$password"
+        return 1
+    fi
 
-    # Build payload: 0x01 + key_id(1) + IV(12) + rsa_size(2) + rsa_encrypted + tag(16) + aes_ciphertext
+    local rsa_size_le
+    rsa_size_le=$(printf '%04x' "$rsa_size" | sed 's/\(..\)\(..\)/\2\1/')
     local payload
     payload="01"
     payload="${payload}$(printf '%02x' "$key_id")"
     payload="${payload}${iv_hex}"
-    payload="${payload}$(printf '%04x' "$rsa_size" | sed 's/\(..\)\(..\)/\2\1/')"
+    payload="${payload}${rsa_size_le}"
     payload="${payload}${rsa_encrypted_hex}"
-    payload="${payload}${tag_hex}"
-    payload="${payload}${encrypted_body}"
+    payload="${payload}${aes_tag}"
+    payload="${payload}${aes_body}"
 
-    # Base64 encode and format
     printf '#PWD_INSTAGRAM:4:%s:%s' "$timestamp" "$(printf '%s' "$payload" | xxd -r -p | base64 | tr -d '\n')"
 }
 
 fetch_public_key() {
-    local response
+    local key_id=""
+    local pubkey=""
+    local hdr_file
+    hdr_file=$(mktemp)
+    local body_file
+    body_file=$(mktemp)
+
+    local curl_extra_args=()
     if [[ "$MODE" == "tor" ]]; then
-        response=$(curl --socks5 "127.0.0.1:${WORKING_PORTS[0]}" -s -H "User-Agent: $useragent" \
-            -H "X-IG-App-ID: $app_id" \
-            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
+        curl_extra_args+=(--socks5 "127.0.0.1:${WORKING_PORTS[0]}")
     elif [[ "$MODE" == "proxy" ]]; then
-        response=$(curl --socks5 "$PROXY" -s -H "User-Agent: $useragent" \
-            -H "X-IG-App-ID: $app_id" \
-            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
-    else
-        response=$(curl -s -H "User-Agent: $useragent" \
-            -H "X-IG-App-ID: $app_id" \
-            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
+        curl_extra_args+=(--socks5 "$PROXY")
     fi
 
-    local key_id
-    local pubkey
-    key_id=$(printf '%s' "$response" | grep -oi "ig-set-password-encryption-key-id" | head -1)
-    pubkey=$(printf '%s' "$response" | grep -oi "ig-set-password-encryption-pub-key" | head -1)
+    if [[ "$DEBUG" -eq 1 ]]; then
+        printf "\e[1;93m[DEBUG] Fetching encryption keys from Instagram API...\e[0m\n"
+    fi
+
+    curl "${curl_extra_args[@]}" -s -D "$hdr_file" -o "$body_file" \
+        -H "User-Agent: $useragent" \
+        -H "X-IG-App-ID: $app_id" \
+        "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=${uuid}" 2>/dev/null
+
+    key_id=$(grep -i "ig-set-password-encryption-key-id" "$hdr_file" 2>/dev/null | head -1 | sed 's/[^0-9]*//g' | tr -d '\r\n ')
+    pubkey=$(grep -i "ig-set-password-encryption-pub-key" "$hdr_file" 2>/dev/null | head -1 | sed 's/.*: *//' | tr -d '\r\n ')
 
     if [[ -n "$key_id" && -n "$pubkey" ]]; then
-        key_id=$(printf '%s' "$response" | sed -n 's/.*ig-set-password-encryption-key-id: \([0-9]*\).*/\1/p' | head -1)
-        pubkey=$(printf '%s' "$response" | sed -n 's/.*ig-set-password-encryption-pub-key: \(.*\)/\1/p' | head -1 | tr -d '\r')
-        echo "${key_id}|${pubkey}"
-    else
-        local headers
-        headers=$(printf '%s' "$response")
-        key_id=$(printf '%s' "$headers" | grep -i "ig-set-password-encryption-key-id" | head -1 | awk '{print $2}' | tr -d '\r')
-        pubkey=$(printf '%s' "$headers" | grep -i "ig-set-password-encryption-pub-key" | head -1 | sed 's/.*: //' | tr -d '\r')
-        if [[ -n "$key_id" && -n "$pubkey" ]]; then
-            echo "${key_id}|${pubkey}"
-        else
-            printf "\e[1;91m[!] Failed to fetch encryption keys\e[0m\n"
-            if [[ "$DEBUG" -eq 1 ]]; then
-                printf "\e[1;93m[DEBUG] Key fetch response:\n%s\e[0m\n" "$response"
-            fi
-            return 1
+        if [[ "$DEBUG" -eq 1 ]]; then
+            printf "\e[1;93m[DEBUG] Got key_id=%s from fetch_headers (len=%s)\e[0m\n" "$key_id" "${#pubkey}"
         fi
+        rm -f "$hdr_file" "$body_file"
+        echo "${key_id}|${pubkey}"
+        return 0
     fi
+
+    if [[ "$DEBUG" -eq 1 ]]; then
+        printf "\e[1;93m[DEBUG] fetch_headers failed, trying login endpoint...\e[0m\n"
+    fi
+
+    local hc_jazoest
+    hc_jazoest=$(generate_jazoest "$phone")
+    local hc_adid
+    hc_adid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)/\1-/g;s/-$//')
+    local login_data="{\"jazoest\":\"${hc_jazoest}\",\"country_codes\":\"[{\\\\\"country_code\\\\\":\\\\\"1\\\\\",\\\\\"source\\\\\":[\\\\\"default\\\\\"]}]\",\"phone_id\":\"${phone}\",\"enc_password\":\"#PWD_INSTAGRAM:4:0:test\",\"username\":\"__test__\",\"adid\":\"${hc_adid}\",\"guid\":\"${guid}\",\"device_id\":\"${device}\",\"google_tokens\":\"[]\",\"login_attempt_count\":\"0\"}"
+    local login_hmac
+    login_hmac=$(printf '%s' "$login_data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
+
+    curl "${curl_extra_args[@]}" -s -D "$hdr_file" -o "$body_file" \
+        -X POST \
+        -d "ig_sig_key_version=4&signed_body=${login_hmac}.${login_data}" \
+        -H "User-Agent: $useragent" \
+        -H "X-IG-App-ID: $app_id" \
+        -H "X-IG-Capabilities: 3brTv10=" \
+        -H "X-IG-Connection-Type: WIFI" \
+        -H "X-Bloks-Version-Id: $BLOKS_VERSIONING_ID" \
+        -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+        "https://i.instagram.com/api/v1/accounts/login/" 2>/dev/null
+
+    key_id=$(grep -i "ig-set-password-encryption-key-id" "$hdr_file" 2>/dev/null | head -1 | sed 's/[^0-9]*//g' | tr -d '\r\n ')
+    pubkey=$(grep -i "ig-set-password-encryption-pub-key" "$hdr_file" 2>/dev/null | head -1 | sed 's/.*: *//' | tr -d '\r\n ')
+
+    if [[ -n "$key_id" && -n "$pubkey" ]]; then
+        if [[ "$DEBUG" -eq 1 ]]; then
+            printf "\e[1;93m[DEBUG] Got key_id=%s from login endpoint (len=%s)\e[0m\n" "$key_id" "${#pubkey}"
+        fi
+        rm -f "$hdr_file" "$body_file"
+        echo "${key_id}|${pubkey}"
+        return 0
+    fi
+
+    if [[ "$DEBUG" -eq 1 ]]; then
+        printf "\e[1;93m[DEBUG] Headers from login endpoint:\n%s\e[0m\n" "$(cat "$hdr_file" 2>/dev/null | head -20)"
+        printf "\e[1;93m[DEBUG] Body:\n%s\e[0m\n" "$(cat "$body_file" 2>/dev/null | head -5)"
+    fi
+
+    rm -f "$hdr_file" "$body_file"
+    printf "\e[1;91m[!] Could not fetch encryption keys from API\e[0m\n"
+    return 1
 }
 
 function start() {
